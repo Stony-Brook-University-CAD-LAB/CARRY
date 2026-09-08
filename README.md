@@ -16,7 +16,7 @@ The project combines embedded AI, computer vision, motor control, and navigation
 | May 8–13, 2026 | Camera and simulation run commands documented, alongside depth sensing, obstacle avoidance, and YOLO/depth fusion work. |
 | August 27, 2026 | Base completed and installed; circuit reconfigured and CAD work continued. Cover chassis and mounts for the buck converter and WAGO connectors remained in progress; portable Jetson power was still pending. |
 
-The repository is being initialized with project documentation. The scripts described below are referenced in the project log and still need to be added here before the documented commands can be run from this repository.
+The navigation, perception, and simulation source has now been merged into this repository and is listed under [Repository layout](#repository-layout). Dependency versions and device-specific setup still need to be documented and verified on the target hardware.
 
 ## Delivery modes
 
@@ -64,20 +64,29 @@ Serial motor bridge (integration planned)
 Microcontroller -> motor driver -> motors
 ```
 
-## Software referenced in the project log
+## Repository layout
 
-These filenames describe the existing development workspace referenced by the team, rather than files currently included in this repository.
+The development workspace has been merged in; these files are present in this repository.
 
-| Script | Documented purpose |
+| Path | Purpose |
 | --- | --- |
-| `scripts/yolo_object_detection.py` | Camera-based YOLO object detection |
-| `scripts/astra_camera.py` | Orbbec Astra depth camera integration using OpenNI2 |
-| `scripts/nav_logic.py` | Depth zones, navigation thresholds, obstacle avoidance, and stuck recovery |
-| `scripts/yolo_obstacle_detection.py` | YOLO detection combined with depth sensing |
-| `scripts/sim.py` | Building map and simulator |
-| `scripts/collect_collision_data.py` | Collision data collection |
+| `scripts/nav_logic.py` | Depth-zone navigation policy: L/C/R zone analysis, GO/AVOID/STOP thresholds, and stuck recovery. Pure numpy, with no camera or display dependency. |
+| `scripts/astra_camera.py` | Orbbec Astra Pro integration. RGB over V4L2, depth over OpenNI2; returns synchronized colour and depth frames. |
+| `scripts/yolo_obstacle_detection.py` | Live navigator. Depth drives steering; YOLO labels what is visible but does not influence throttle or steer. |
+| `scripts/sim.py` | Top-down simulator. Ray-casts a synthetic depth view against the building map and drives the same `nav_logic` policy as the live navigator. |
+| `scripts/building_map.py` | Occupancy grid of Light Engineering floor 2 (100 x 80 ft outer, 8 ft corridors, 10 cm cells). |
+| `scripts/collect_collision_data.py` | Capture tool for free/blocked training pairs: colour JPEG plus uint16 depth PNG sharing a timestamp. |
+| `scripts/motor_driver.py` | Motor command wrapper. Ships in `DRY_RUN` mode and only prints commands; the serial bridge to the microcontroller is not yet implemented. |
+| `scripts/test_camera_preview.py` | Minimal preview for confirming the Astra is enumerating. |
+| `camera_stream.py` | Flask MJPEG server on port 5000 for viewing the navigation overlay from a browser. |
+| `fps_test.py` | Raw V4L2 capture-rate benchmark. |
+| `data/collision/` | Captured free/blocked image pairs. |
+| `building_map.png` | Rendered occupancy map. |
 
-Human-following code is also reported in the project log, but its entry-point filename is not specified.
+Two items named in the project log are **not** present in this repository: a
+`scripts/yolo_object_detection.py` entry point, and the human-following code. The
+closest existing file is `scripts/yolo_obstacle_detection.py`, which is the
+depth-plus-YOLO navigator rather than standalone object detection.
 
 ## Development setup notes
 
@@ -85,10 +94,10 @@ The commands below reproduce the May 2026 project notes. They are not yet a veri
 
 ### Existing lab environment
 
-The documented Jetson workspace uses these machine-specific paths:
+Run commands from the repository root. The lab Jetson uses a virtualenv at a machine-specific path:
 
 ```bash
-cd ~/jetbot-project
+cd /path/to/CARRY
 source /home/cad281/jetson-ai/bin/activate
 ```
 
@@ -125,15 +134,24 @@ PY
 After the scripts and required dependencies are available, run the appropriate command from the development project root:
 
 ```bash
-# Object detection
-python3 scripts/yolo_object_detection.py
+# Top-down simulator (no camera required; runs on any machine)
+PYTHONPATH=scripts python3 scripts/sim.py
 
-# Building simulation
-python3 scripts/sim.py
+# Render the building occupancy map
+PYTHONPATH=scripts python3 scripts/building_map.py
 
-# YOLO and depth-based obstacle detection
+# Live YOLO + depth navigator (requires the Astra camera)
 PYTHONPATH=scripts python3 scripts/yolo_obstacle_detection.py
+
+# Browser-viewable navigation stream, then open http://<jetson-ip>:5000
+PYTHONPATH=scripts python3 camera_stream.py
+
+# Collect free/blocked training data
+PYTHONPATH=scripts python3 scripts/collect_collision_data.py
 ```
+
+`scripts/` is not a package, so the modules import each other flat; `PYTHONPATH=scripts`
+is required for every entry point above.
 
 ## Safety protocol from the project log
 
