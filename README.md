@@ -102,6 +102,8 @@ depth-plus-YOLO navigator rather than standalone object detection.
 
 This is the procedure tested on October 23, 2026. The rover and iPad must both be on the lab UniFi Wi-Fi.
 
+The full step-by-step guide is in [`ros2_ws/docs/rover-startup-ipad.md`](ros2_ws/docs/rover-startup-ipad.md).
+
 | What | Value |
 | --- | --- |
 | SSH | `ssh cad281@<rover-ip>` |
