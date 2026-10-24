@@ -6,6 +6,10 @@ CARRY aims to transport small payloads—such as supplies, food, and packages—
 
 The project combines embedded AI, computer vision, motor control, and navigation. Development focuses first on a human-following delivery robot, followed by autonomous travel between predefined delivery points.
 
+The current build (V1) is a **tracked rover that delivers mail while avoiding obstacles**, running ROS 2 on an NVIDIA Jetson Orin Nano with an ESP32 motor controller and an Orbbec Astra Pro depth camera. It can be driven manually or switched to autonomous obstacle avoidance from an iPad app.
+
+**Team (Fall 2026):** Danny Ouyang (EE), Siddhant Mohile (CS), Marco Wu (CME), Akeen Karkare (CS). **Mentor:** Jenny Chen, ECE CAD Lab.
+
 ## Project status
 
 **Prototype in development.** The following milestones are reported in the shared project log; they are not a claim of completed autonomous deployment.
@@ -15,8 +19,11 @@ The project combines embedded AI, computer vision, motor control, and navigation
 | May 7, 2026 | Both motors confirmed functional; robot driving independently of Jetson Nano integration. ESP32 USB connection verified. Camera code reported working. |
 | May 8–13, 2026 | Camera and simulation run commands documented, alongside depth sensing, obstacle avoidance, and YOLO/depth fusion work. |
 | August 27, 2026 | Base completed and installed; circuit reconfigured and CAD work continued. Cover chassis and mounts for the buck converter and WAGO connectors remained in progress; portable Jetson power was still pending. |
+| September 24, 2026 | Autonomy plan set: build a floor map with RTAB-Map, place AprilTags at drift-prone spots, add a navigation stack for point-to-point paths, and bridge planner output to the motors over serial. Tag detection and camera setup in testing. |
+| October 9, 2026 | Rover presented at Poster Day. V1 demo shows basic control and obstacle avoidance. |
+| October 23, 2026 | End-to-end test with the iPad app over SSH: rosbridge (port 9090), motor node, video stream (port 5000) and autonomous mode brought up. Fixes merged as `ros2_ws/` (see [Run the rover with the iPad app](#run-the-rover-with-the-ipad-app)). |
 
-The navigation, perception, and simulation source has now been merged into this repository and is listed under [Repository layout](#repository-layout). Dependency versions and device-specific setup still need to be documented and verified on the target hardware.
+The navigation, perception, and simulation source has been merged into this repository and is listed under [Repository layout](#repository-layout). The ROS 2 workspace the rover runs today is in `ros2_ws/`.
 
 ## Delivery modes
 
@@ -37,32 +44,34 @@ These are development objectives; full integration and validation remain ongoing
 
 ## Hardware and architecture
 
-| Subsystem | Documented components and role |
+V1 hardware as presented at Poster Day (October 2026):
+
+| Subsystem | Component and role |
 | --- | --- |
-| Onboard compute | NVIDIA Jetson Nano for perception and navigation decisions |
-| Motor control | ESP32 / Arduino work documented; Jetson-to-controller integration remains a next step |
-| Mobility | Motorized chassis; differential drive is described in the system proposal |
-| Perception | Orbbec Astra depth camera with OpenNI2 in the development log; YOLO for object/person detection |
-| Power | 3S 11.1 V LiPo battery, regulated 5 V supply, switch, fuse, and connectors described in the parts plan |
-| Mechanical | Custom CAD/printed base, cover chassis, battery retention, and electronics mounts |
-| Planned sensing | Wheel encoders and IMU for odometry and heading; LiDAR considered for later autonomy |
+| Compute ("brain") | NVIDIA Jetson Orin Nano: runs ROS 2, perception, YOLO and navigation |
+| Motor control | ESP32: turns serial commands from the Jetson into motor signals and reads the encoders |
+| Motor driver | TB6612FNG dual driver: PWM and direction for both track motors |
+| Mobility ("body") | Tracked chassis with 2 DC motors with encoders, in an enclosed electronics box |
+| Perception ("eyes") | Orbbec Astra Pro RGB-D camera over USB 3.0, depth range 0.4–8 m |
+| Power | 11.1 V 3S 5000 mAh LiPo → XT60 inline switch → 15 A blade fuse → E-STOP; UBEC steps down to 5 V / 5 A for the Jetson; motors run on 11.1 V |
+| Safety | Red mushroom E-STOP cuts main power and signals the software on GPIO4 |
+| Mechanical | Custom CAD base, cover chassis, battery retention and electronics mounts |
 
-The source includes multiple hardware proposals, including RealSense and ultrasonic sensing alternatives. Confirm the assembled hardware before selecting drivers or wiring instructions.
+Earlier proposals in the project log (RealSense, ultrasonic sensors, LiDAR) are not part of the V1 build.
 
-The proposed control path is:
+Control path (sense → think → act):
 
 ```text
-Camera / depth sensing
-        |
+Orbbec Astra Pro (depth + RGB)
+        | USB 3.0
         v
-Jetson Nano: detection and navigation
-        |
+Jetson Orin Nano: ROS 2, YOLO, obstacle avoidance
+        | serial (USB, /dev/ttyUSB0, 115200)
         v
-Serial motor bridge (integration planned)
-        |
-        v
-Microcontroller -> motor driver -> motors
+ESP32 -> TB6612FNG (PWM + direction) -> track motors
 ```
+
+Autonomy stack: ROS 2 for communication, RTAB-Map SLAM for mapping, YOLO for obstacle and person detection, wheel encoders for odometry, and a stop–scan–re-route behaviour when the path is blocked.
 
 ## Repository layout
 
@@ -89,9 +98,40 @@ Two items named in the project log are **not** present in this repository: a
 closest existing file is `scripts/yolo_obstacle_detection.py`, which is the
 depth-plus-YOLO navigator rather than standalone object detection.
 
+## Run the rover with the iPad app
+
+This is the procedure tested on October 23, 2026. The rover and iPad must both be on the lab UniFi Wi-Fi.
+
+| What | Value |
+| --- | --- |
+| SSH | `ssh cad281@<rover-ip>` |
+| App connection (rosbridge) | port `9090` |
+| Video stream | port `5000`, path `/stream` |
+| ROS 2 workspace on the rover | `~/ROVERBOT` (same code as `ros2_ws/` here) |
+
+One command starts rosbridge, both cameras, YOLO, obstacle avoidance, the motor node and the video stream:
+
+```bash
+cd ~/ROVERBOT && source /opt/ros/humble/setup.bash && source install/setup.bash
+ros2 launch rover_bringup full.launch.xml
+```
+
+Then open the iPad app, set rosbridge to `9090` and video to `5000`, and tap **Connect**. **Manual** uses the arrow buttons; **Autonomous** turns on obstacle avoidance. **STOP** always works.
+
+| App message | Cause | Fix |
+| --- | --- | --- |
+| Can't connect / port 9090 refused | rosbridge not running | Start rosbridge (included in `full.launch.xml`) |
+| "Service /rover_motor/set_parameters does not exist" | Motor node not running | Run the launch file, or `ros2 run rover_motor motor_node` |
+| "Package 'rover_motor' not found" | Workspace not sourced | `source install/setup.bash` in every new terminal |
+| "Video: Could not connect" | Nothing on port 5000 | Start the launch file, or `camera_stream.py` for manual-only use |
+| Camera "Resource busy" | Another program holds the Astra (only one can) | `pkill -f camera_stream.py`, then relaunch |
+| "Could not enable Autonomous" | `obstacle_avoidance` not running | Use `full.launch.xml` / `rover.launch.xml` |
+
+Run only one copy of each program: two motor nodes fight over the ESP32 serial port, and two camera programs fight over the Astra.
+
 ## Development setup notes
 
-The commands below reproduce the May 2026 project notes. They are not yet a verified installation procedure for a fresh checkout. The repository still needs the source code, dependency versions, and device-specific setup instructions.
+These commands are for the Python scripts at the repository root and reproduce the May 2026 project notes. They are not yet a verified installation procedure for a fresh checkout; dependency versions and device-specific setup still need to be documented. For the ROS 2 stack, see `ros2_ws/README.md`.
 
 ### Existing lab environment
 
@@ -154,25 +194,42 @@ PYTHONPATH=scripts python3 scripts/collect_collision_data.py
 `scripts/` is not a package, so the modules import each other flat; `PYTHONPATH=scripts`
 is required for every entry point above.
 
-## Safety protocol from the project log
+## Safety
 
-- Keep the main motor power supply off while communicating with the ESP32 during bench setup, as directed in the project notes.
+Bench setup (project log):
+
+- Keep the main motor power supply off while communicating with the ESP32 during bench setup.
 - Cut power immediately if humming or overheating occurs.
-- Emergency stop, power protection, secure battery mounting, and safe stop behavior are part of the development plan and require verification before integrated driving tests.
+
+Lab safety guidelines for demos:
+
+- **Know the E-STOP:** press the red E-STOP to cut all power to the rover instantly.
+- **Keep a clear zone:** stay at least 1 m (3 ft) back while the rover is driving.
+- **Power off first:** switch off at the XT60 before touching tracks, motors, or wiring.
+- **Care for the LiPo:** charge on a balance charger in a fire-safe bag, never unattended.
+- **Spot warning signs:** stop and report a swollen battery, hot wires, or a burning smell.
+- **Run with supervision:** operate the rover only with trained lab staff present.
+
+In an emergency: press the E-STOP, step back, and alert lab staff.
 
 ## Roadmap
 
-1. **Complete mechanical and power integration:** finish the cover chassis, secure the battery, mount the buck converter and connectors, and establish portable Jetson power.
-2. **Connect perception to motor control:** implement and validate the Jetson-to-ESP32 serial bridge and motor command handling.
-3. **Calibrate wheel encoders:** measure actual travel, determine ticks per meter for each wheel, and validate distance and turns.
-4. **Integrate an IMU:** improve heading estimates and combine IMU measurements with encoder odometry.
-5. **Integrate ROS:** select a compatible ROS environment, publish odometry and IMU data, and test movement commands.
-6. **Improve navigation:** smooth steering, adjust speed to clearance, add wall following, and progress toward mapped routes and waypoint delivery.
-7. **Integrate human following:** connect detection and distance estimates to motion control, including lost-target and obstacle stop behavior.
-8. **Validate reliability:** conduct extended runs, test delivery payloads and safety behavior, and evaluate battery monitoring and a monitoring dashboard.
+Done in V1: ROS 2 on the Jetson, Jetson-to-ESP32 serial motor control (`rover_motor`), depth-based obstacle avoidance with YOLO person stop, and iPad manual/autonomous control.
+
+Next for V1:
+
+1. **Mapping and localization:** build a floor map with RTAB-Map and place AprilTags at drift-prone spots.
+2. **Path planning:** add a navigation stack so the rover can plan between any two points, not only drive forward, and bridge its output to the motors.
+3. **Calibrate wheel encoders and add an IMU:** ticks per meter for each track, then fuse IMU heading with encoder odometry.
+4. **Fix known issues from the October 23 test:** left and right controls are swapped in the app; the camera view is too zoomed in, so objects look closer than they are; obstacle detection needs improvement.
+5. **Connectivity:** the rover only works on the UniFi network; evaluate Bluetooth or a USB Wi-Fi dongle.
+6. **Human following:** connect person detection and distance to motion control, with lost-target and obstacle stops.
+7. **Reliability:** 30+ minute runs, battery monitoring, and multiple delivery waypoints on the building map.
+
+V2 (next-generation upgrade, planned): keeps the V1 compute and depth camera and adds a robotic arm with gripper, mecanum wheels, sweeper brushes and a front-mounted depth camera, so the rover can pick up, carry and clean along its route. Core parts are estimated at under $800.
 
 ## Source documentation
 
-This README summarizes the shared [CARRY project plan and development log](https://docs.google.com/document/d/1aS6I8t9bZzvT69oGxUss__Pbkqzwnhu3tOi9AWAEsmA/edit?tab=t.jsert22n468u), including the May–August 2026 progress notes and delivery robot proposal. Access to the source document may require permission.
+This README summarizes the shared [CARRY project plan and development log](https://docs.google.com/document/d/1aS6I8t9bZzvT69oGxUss__Pbkqzwnhu3tOi9AWAEsmA/edit?tab=t.jsert22n468u), including the May–September 2026 progress notes and delivery robot proposal, plus the October 2026 Poster Day poster and presentation (*Autonomous Delivery Rover*), the V2 shopping list, and the October 23 iPad startup test. Access to the source documents may require permission.
 
 Procurement estimates and runtime projections in the source are planning figures; a verified bill of materials and measured runtime should be added as the build is finalized.
