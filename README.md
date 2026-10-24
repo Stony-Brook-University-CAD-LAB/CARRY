@@ -78,10 +78,11 @@ The development workspace has been merged in; these files are present in this re
 | `scripts/collect_collision_data.py` | Capture tool for free/blocked training pairs: colour JPEG plus uint16 depth PNG sharing a timestamp. |
 | `scripts/motor_driver.py` | Motor command wrapper. Ships in `DRY_RUN` mode and only prints commands; the serial bridge to the microcontroller is not yet implemented. |
 | `scripts/test_camera_preview.py` | Minimal preview for confirming the Astra is enumerating. |
-| `camera_stream.py` | Flask MJPEG server on port 5000 for viewing the navigation overlay from a browser. |
+| `camera_stream.py` | Flask MJPEG server on port 5000 (`/stream` or `/video_feed`) for viewing the navigation overlay from a browser or the iPad app. |
 | `fps_test.py` | Raw V4L2 capture-rate benchmark. |
 | `data/collision/` | Captured free/blocked image pairs. |
 | `building_map.png` | Rendered occupancy map. |
+| `ros2_ws/` | ROS 2 Humble workspace that runs on the rover with the iPad app: motor, camera, YOLO, obstacle-avoidance and launch packages. See `ros2_ws/README.md`. |
 
 Two items named in the project log are **not** present in this repository: a
 `scripts/yolo_object_detection.py` entry point, and the human-following code. The
