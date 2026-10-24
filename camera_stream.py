@@ -228,6 +228,7 @@ def index():
     """
 
 
+@app.route("/stream")  # path the iPad app requests
 @app.route("/video_feed")
 def video_feed():
 
