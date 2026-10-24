@@ -35,7 +35,30 @@ public:
     person_hold_s_ = declare_parameter<double>("person_hold_s", 0.75);
     person_confirm_frames_ = declare_parameter<int>("person_confirm_frames", 3);
     person_clear_frames_ = declare_parameter<int>("person_clear_frames", 3);
+    person_stop_distance_ = declare_parameter<double>("person_stop_distance", 1.5);
     enabled_ = declare_parameter<bool>("enabled", false);
+
+    // Camera geometry, used to turn depth pixels into 3D points so the floor
+    // and anything outside the rover's path are ignored. Measure these on the
+    // rover: height of the lens above the floor and downward tilt.
+    camera_height_ = declare_parameter<double>("camera_height", 0.20);
+    camera_pitch_ = declare_parameter<double>("camera_pitch_deg", 0.0) * M_PI / 180.0;
+    fx_ = declare_parameter<double>("fx", 570.0);
+    fy_ = declare_parameter<double>("fy", 570.0);
+    cx_ = declare_parameter<double>("cx", -1.0);  // <0: image centre
+    cy_ = declare_parameter<double>("cy", -1.0);
+    robot_width_ = declare_parameter<double>("robot_width", 0.30);
+    side_margin_ = declare_parameter<double>("side_margin", 0.05);
+    side_window_ = declare_parameter<double>("side_window", 0.40);
+    floor_margin_ = declare_parameter<double>("floor_margin", 0.04);
+    max_obstacle_height_ = declare_parameter<double>("max_obstacle_height", 0.50);
+    max_range_ = declare_parameter<double>("max_range", 4.0);
+    min_points_ = declare_parameter<int>("min_points", 20);
+    sample_step_ = std::max(1, static_cast<int>(declare_parameter<int>("sample_step", 4)));
+    filter_frames_ = std::max(1, static_cast<int>(declare_parameter<int>("filter_frames", 3)));
+    no_depth_fraction_ = declare_parameter<double>("no_depth_fraction", 0.6);
+    rgb_width_ = declare_parameter<int>("rgb_width", 640);
+    rgb_height_ = declare_parameter<int>("rgb_height", 480);
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     status_pub_ = create_publisher<std_msgs::msg::String>("/navigation/status", 10);
@@ -70,6 +93,13 @@ private:
     BLOCKED
   };
 
+  struct Clearance {
+    double left;
+    double center;
+    double right;
+    bool no_depth;  // centre too close for the camera to measure
+  };
+
   void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg) {
     if (msg->encoding != "16UC1" || msg->data.empty()) return;
     width_ = static_cast<int>(msg->width);
@@ -78,13 +108,154 @@ private:
     depth_ = msg->data;
     have_depth_ = true;
     last_depth_ = now();
+
+    history_.push_back(measure());
+    while (static_cast<int>(history_.size()) > filter_frames_) history_.erase(history_.begin());
+  }
+
+  uint16_t depth_at(int x, int y) const {
+    const size_t offset = static_cast<size_t>(y) * step_ + static_cast<size_t>(x) * 2;
+    if (offset + 1 >= depth_.size()) return 0;
+    uint16_t mm = 0;
+    std::memcpy(&mm, &depth_[offset], sizeof(mm));
+    return mm;
+  }
+
+  // Projects the depth image into 3D, drops floor points and anything too
+  // high to hit, and reports the nearest obstacle ahead in three lanes:
+  // the rover's own path (centre) and a window either side of it.
+  Clearance measure() const {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double cx = cx_ >= 0.0 ? cx_ : width_ / 2.0;
+    const double cy = cy_ >= 0.0 ? cy_ : height_ / 2.0;
+    const double half_path = robot_width_ / 2.0 + side_margin_;
+    const double cos_p = std::cos(camera_pitch_);
+    const double sin_p = std::sin(camera_pitch_);
+
+    std::vector<double> left, center, right;
+    int lower_total = 0, lower_missing = 0;
+
+    for (int y = 0; y < height_; y += sample_step_) {
+      for (int x = 0; x < width_; x += sample_step_) {
+        const uint16_t mm = depth_at(x, y);
+
+        // The Astra returns 0 for anything closer than ~0.4 m. Track missing
+        // depth in the lower-middle of the image, where the floor is normally
+        // visible, so a very close obstacle reads as blocked, not clear.
+        if (x >= width_ / 3 && x < 2 * width_ / 3 && y >= height_ / 2 && y < height_ * 9 / 10) {
+          ++lower_total;
+          if (mm == 0) ++lower_missing;
+        }
+        if (mm < 100 || mm > 8000) continue;
+
+        const double z = mm / 1000.0;
+        const double px = (x - cx) * z / fx_;  // right of the camera
+        const double py = (y - cy) * z / fy_;  // below the camera
+        const double forward = z * cos_p - py * sin_p;
+        const double height = camera_height_ - (py * cos_p + z * sin_p);
+        if (forward <= 0.0 || forward > max_range_) continue;
+        if (height < floor_margin_ || height > max_obstacle_height_) continue;
+
+        if (std::abs(px) <= half_path) center.push_back(forward);
+        else if (px < 0.0 && px >= -(half_path + side_window_)) left.push_back(forward);
+        else if (px > 0.0 && px <= half_path + side_window_) right.push_back(forward);
+      }
+    }
+
+    // Nearest obstacle in a lane, ignoring isolated noisy pixels.
+    auto nearest = [this, inf](std::vector<double> &d) {
+      if (static_cast<int>(d.size()) < min_points_) return inf;
+      const size_t idx = std::max<size_t>(static_cast<size_t>(min_points_) / 2, d.size() / 20);
+      std::nth_element(d.begin(), d.begin() + idx, d.end());
+      return d[idx];
+    };
+
+    Clearance c{nearest(left), nearest(center), nearest(right), false};
+    if (lower_total > 0 &&
+        static_cast<double>(lower_missing) / lower_total >= no_depth_fraction_) {
+      c.no_depth = true;
+      c.center = 0.0;
+    }
+    return c;
+  }
+
+  // Median of the last few frames, so one noisy frame cannot trigger a stop
+  // or hide an obstacle.
+  Clearance clearance() const {
+    const double inf = std::numeric_limits<double>::infinity();
+    if (history_.empty()) return {inf, inf, inf, false};
+    auto median = [this](double Clearance::*field) {
+      std::vector<double> v;
+      for (const auto &c : history_) v.push_back(c.*field);
+      std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+      return v[v.size() / 2];
+    };
+    int no_depth = 0;
+    for (const auto &c : history_) no_depth += c.no_depth ? 1 : 0;
+    return {median(&Clearance::left), median(&Clearance::center), median(&Clearance::right),
+            no_depth * 2 > static_cast<int>(history_.size())};
+  }
+
+  // Distance to the nearest point inside a YOLO box (RGB pixel coordinates),
+  // read from the depth image. The Astra's RGB and depth views are close
+  // enough at 640x480 for this rough check.
+  double box_distance(double bx, double by, double bw, double bh) const {
+    if (!have_depth_ || width_ <= 0 || height_ <= 0) return std::numeric_limits<double>::infinity();
+    const double sx = static_cast<double>(width_) / rgb_width_;
+    const double sy = static_cast<double>(height_) / rgb_height_;
+    const int x0 = std::clamp(static_cast<int>((bx + 0.25 * bw) * sx), 0, width_ - 1);
+    const int x1 = std::clamp(static_cast<int>((bx + 0.75 * bw) * sx), x0 + 1, width_);
+    const int y0 = std::clamp(static_cast<int>((by + 0.25 * bh) * sy), 0, height_ - 1);
+    const int y1 = std::clamp(static_cast<int>((by + 0.75 * bh) * sy), y0 + 1, height_);
+    std::vector<uint16_t> samples;
+    for (int y = y0; y < y1; y += sample_step_) {
+      for (int x = x0; x < x1; x += sample_step_) {
+        const uint16_t mm = depth_at(x, y);
+        if (mm >= 100 && mm <= 8000) samples.push_back(mm);
+      }
+    }
+    if (samples.size() < 5) return std::numeric_limits<double>::infinity();
+    const size_t idx = samples.size() / 5;
+    std::nth_element(samples.begin(), samples.begin() + idx, samples.end());
+    return samples[idx] / 1000.0;
+  }
+
+  static double json_number(const std::string &obj, const std::string &key) {
+    const auto pos = obj.find("\"" + key + "\":");
+    if (pos == std::string::npos) return std::nan("");
+    return std::strtod(obj.c_str() + pos + key.size() + 3, nullptr);
+  }
+
+  // A person only blocks the rover when they overlap its path and are within
+  // person_stop_distance; people off to the side or far away are ignored.
+  bool person_in_path(const std::string &json) const {
+    const double half_path_px = (robot_width_ / 2.0 + side_margin_) * fx_ / std::max(0.5, person_stop_distance_);
+    const double path_x0 = rgb_width_ / 2.0 - half_path_px;
+    const double path_x1 = rgb_width_ / 2.0 + half_path_px;
+
+    size_t start = 0;
+    while ((start = json.find('{', start)) != std::string::npos) {
+      const size_t end = json.find('}', start);
+      if (end == std::string::npos) break;
+      const std::string obj = json.substr(start, end - start + 1);
+      start = end + 1;
+      if (obj.find("\"class\":\"person\"") == std::string::npos) continue;
+
+      const double bx = json_number(obj, "x");
+      const double by = json_number(obj, "y");
+      const double bw = json_number(obj, "w");
+      const double bh = json_number(obj, "h");
+      if (std::isnan(bx) || std::isnan(bw)) return true;  // old message format: be safe
+      if (bx + bw < path_x0 || bx > path_x1) continue;
+      if (box_distance(bx, by, bw, bh) <= person_stop_distance_) return true;
+    }
+    return false;
   }
 
   void yolo_callback(const std_msgs::msg::String::SharedPtr msg) {
     if (!stop_for_person_) return;
 
-    const bool person_detected =
-      msg->data.find("\"class\":\"person\"") != std::string::npos;
+    const bool person_detected = person_in_path(msg->data);
 
     if (person_detected) {
       last_person_seen_ = now();
@@ -119,30 +290,6 @@ private:
     if (!stop_for_person_ || !person_blocking_) return false;
     if (last_person_seen_.nanoseconds() == 0) return false;
     return (now() - last_person_seen_).seconds() <= person_hold_s_;
-  }
-
-  double region_distance(double x0f, double x1f, double y0f = 0.05, double y1f = 0.95) const {
-    if (!have_depth_ || width_ <= 0 || height_ <= 0) return std::numeric_limits<double>::infinity();
-    const int x0 = std::clamp(static_cast<int>(width_ * x0f), 0, width_ - 1);
-    const int x1 = std::clamp(static_cast<int>(width_ * x1f), x0 + 1, width_);
-    const int y0 = std::clamp(static_cast<int>(height_ * y0f), 0, height_ - 1);
-    const int y1 = std::clamp(static_cast<int>(height_ * y1f), y0 + 1, height_);
-
-    std::vector<uint16_t> samples;
-    samples.reserve(((x1 - x0) / 4 + 1) * ((y1 - y0) / 4 + 1));
-    for (int y = y0; y < y1; y += 4) {
-      for (int x = x0; x < x1; x += 4) {
-        const size_t offset = static_cast<size_t>(y) * step_ + static_cast<size_t>(x) * 2;
-        if (offset + 1 >= depth_.size()) continue;
-        uint16_t mm = 0;
-        std::memcpy(&mm, &depth_[offset], sizeof(mm));
-        if (mm >= 100 && mm <= 8000) samples.push_back(mm);
-      }
-    }
-    if (samples.size() < 10) return std::numeric_limits<double>::infinity();
-    const size_t idx = samples.size() / 10;
-    std::nth_element(samples.begin(), samples.begin() + idx, samples.end());
-    return samples[idx] / 1000.0;
   }
 
   void publish_cmd(double linear, double angular) {
@@ -205,7 +352,8 @@ private:
       return;
     }
 
-    const double center = region_distance(0.33, 0.67);
+    const Clearance view = clearance();
+    const double center = view.center;
 
     if (person_recent() && state_ == State::DRIVE) {
       publish_cmd(0.0, 0.0);
@@ -217,13 +365,15 @@ private:
       case State::DRIVE:
         if (center <= too_close_distance_) {
           publish_cmd(0.0, 0.0);
-          publish_status("TOO CLOSE - SCANNING", center);
+          publish_status(view.no_depth ? "TOO CLOSE (NO DEPTH) - SCANNING" : "TOO CLOSE - SCANNING", center);
           RCLCPP_WARN(get_logger(), "TOO CLOSE %.2f m: stop, scan left/right before reversing", center);
           set_state(State::STOP_BEFORE_SCAN);
         } else if (center <= stop_distance_) {
           publish_cmd(0.0, 0.0);
           publish_status("OBSTACLE - AVOIDING", center);
-          avoid_left_ = region_distance(0.00, 0.33) >= region_distance(0.67, 1.00);
+          avoid_left_ = view.left >= view.right;
+          RCLCPP_INFO(get_logger(), "Obstacle %.2f m: turning %s (L=%.2f R=%.2f)",
+                      center, avoid_left_ ? "left" : "right", view.left, view.right);
           set_state(State::AVOID_TURN);
         } else if (center <= caution_distance_) {
           publish_cmd(forward_speed_, 0.0);
@@ -253,7 +403,7 @@ private:
         publish_cmd(0.0, 0.0);
         publish_status("MEASURING LEFT", center);
         if (elapsed() >= settle_time_s_) {
-          left_scan_ = region_distance(0.25, 0.75);
+          left_scan_ = center;
           RCLCPP_INFO(get_logger(), "Left scan: %.2f m", left_scan_);
           set_state(State::TURN_RIGHT_SCAN);
         }
@@ -272,7 +422,7 @@ private:
         publish_cmd(0.0, 0.0);
         publish_status("MEASURING RIGHT", center);
         if (elapsed() >= settle_time_s_) {
-          right_scan_ = region_distance(0.25, 0.75);
+          right_scan_ = center;
           RCLCPP_INFO(get_logger(), "Right scan: %.2f m", right_scan_);
           set_state(State::RETURN_CENTER);
         }
@@ -352,6 +502,7 @@ private:
 
   State state_{State::DRIVE};
   bool enabled_{false};
+  std::vector<Clearance> history_;
   rclcpp::Time state_start_;
   rclcpp::Time last_depth_;
   rclcpp::Time last_person_seen_;
@@ -379,6 +530,23 @@ private:
   int person_clear_frames_{3};
   int person_detect_count_{0};
   int person_clear_count_{0};
+  double person_stop_distance_{1.5};
+
+  double camera_height_{0.20};
+  double camera_pitch_{0.0};
+  double fx_{570.0}, fy_{570.0}, cx_{-1.0}, cy_{-1.0};
+  double robot_width_{0.30};
+  double side_margin_{0.05};
+  double side_window_{0.40};
+  double floor_margin_{0.04};
+  double max_obstacle_height_{0.50};
+  double max_range_{4.0};
+  int min_points_{20};
+  int sample_step_{4};
+  int filter_frames_{3};
+  double no_depth_fraction_{0.6};
+  int rgb_width_{640};
+  int rgb_height_{480};
 
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;

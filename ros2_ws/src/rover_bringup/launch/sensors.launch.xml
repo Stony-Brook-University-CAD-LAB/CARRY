@@ -1,5 +1,9 @@
 <?xml version="1.0"?>
 <launch>
+  <!-- Mapping turns registration on and publishes depth in the colour frame. -->
+  <arg name="depth_registration" default="false"/>
+  <arg name="depth_frame" default="camera_depth_optical_frame"/>
+
   <set_env name="OPENNI2_REDIST" value="/opt/openni2-orbbec"/>
 
   <node pkg="rover_camera" exec="rgb_node" name="rgb_camera" output="screen">
@@ -14,6 +18,7 @@
     <param name="width" value="640"/>
     <param name="height" value="480"/>
     <param name="fps" value="30"/>
-    <param name="frame_id" value="camera_depth_optical_frame"/>
+    <param name="frame_id" value="$(var depth_frame)"/>
+    <param name="depth_registration" value="$(var depth_registration)"/>
   </node>
 </launch>

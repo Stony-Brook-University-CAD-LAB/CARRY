@@ -1,12 +1,44 @@
 <?xml version="1.0"?>
+<!--
+  RTAB-Map mapping for the rover.
+
+  New map:       ros2 launch rover_bringup mapping.launch.xml rtabmap_args:=-d
+  Add to a map:  ros2 launch rover_bringup mapping.launch.xml
+  Localize only: ros2 launch rover_bringup mapping.launch.xml localization:=true
+
+  Drive slowly with the iPad app (manual mode) while mapping. The map is saved
+  in database_path when the launch is stopped with Ctrl+C.
+-->
 <launch>
-  <include file="$(find-pkg-share rover_bringup)/launch/sensors.launch.xml"/>
+  <!-- Camera mount on the rover: measure these. base_link is the centre of
+       the rover on the floor; x forward, z up. Pitch is downward tilt in radians. -->
+  <arg name="camera_x" default="0.10"/>
+  <arg name="camera_z" default="0.20"/>
+  <arg name="camera_pitch" default="0.0"/>
 
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="base_to_color" output="screen"
-        args="--x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0 --frame-id base_link --child-frame-id camera_color_optical_frame"/>
+  <arg name="localization" default="false"/>
+  <arg name="database_path" default="$(env HOME)/.ros/rtabmap.db"/>
+  <arg name="rtabmap_args" default=""/>
+  <!-- Start rosbridge, the motor node and the video stream so the iPad app can drive. -->
+  <arg name="drive" default="true"/>
 
-  <node pkg="tf2_ros" exec="static_transform_publisher" name="base_to_depth" output="screen"
-        args="--x 0 --y 0 --z 0 --roll 0 --pitch 0 --yaw 0 --frame-id base_link --child-frame-id camera_depth_optical_frame"/>
+  <include file="$(find-pkg-share rover_bringup)/launch/sensors.launch.xml">
+    <arg name="depth_registration" value="true"/>
+    <arg name="depth_frame" value="camera_color_optical_frame"/>
+  </include>
+
+  <!-- base_link -> camera_link: where the camera sits on the rover. -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="base_to_camera" output="screen"
+        args="--x $(var camera_x) --y 0 --z $(var camera_z) --roll 0 --pitch $(var camera_pitch) --yaw 0 --frame-id base_link --child-frame-id camera_link"/>
+
+  <!-- camera_link -> optical frames. Optical frames are z forward, x right,
+       y down, so they need this fixed rotation; without it the map comes out
+       tilted onto its side. -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="camera_to_color" output="screen"
+        args="--x 0 --y 0 --z 0 --roll -1.5707963 --pitch 0 --yaw -1.5707963 --frame-id camera_link --child-frame-id camera_color_optical_frame"/>
+
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="camera_to_depth" output="screen"
+        args="--x 0 --y 0 --z 0 --roll -1.5707963 --pitch 0 --yaw -1.5707963 --frame-id camera_link --child-frame-id camera_depth_optical_frame"/>
 
   <node pkg="rtabmap_sync" exec="rgbd_sync" name="rgbd_sync" output="screen">
     <param name="approx_sync" value="true"/>
@@ -22,15 +54,49 @@
     <param name="odom_frame_id" value="odom"/>
     <param name="publish_tf" value="true"/>
     <param name="subscribe_rgbd" value="true"/>
+    <!-- Ground rover: only x, y and yaw can change. -->
+    <param name="Reg/Force3DoF" value="true" type="str"/>
+    <!-- Restart odometry right away if tracking is lost (fast turns, blank walls). -->
+    <param name="Odom/ResetCountdown" value="1" type="str"/>
+    <param name="Vis/MinInliers" value="12" type="str"/>
     <remap from="rgbd_image" to="/rgbd_image"/>
   </node>
 
-  <node pkg="rtabmap_slam" exec="rtabmap" name="rtabmap" output="screen">
+  <node pkg="rtabmap_slam" exec="rtabmap" name="rtabmap" output="screen" args="$(var rtabmap_args)">
     <param name="frame_id" value="base_link"/>
     <param name="subscribe_rgbd" value="true"/>
     <param name="subscribe_rgb" value="false"/>
     <param name="subscribe_depth" value="false"/>
+    <param name="database_path" value="$(var database_path)"/>
+
+    <param name="Reg/Force3DoF" value="true" type="str"/>
+    <param name="RGBD/ProximityBySpace" value="true" type="str"/>
+    <param name="RGBD/AngularUpdate" value="0.05" type="str"/>
+    <param name="RGBD/LinearUpdate" value="0.05" type="str"/>
+
+    <!-- 2D occupancy grid from depth: floor below 5 cm, obstacles up to 60 cm. -->
+    <param name="Grid/FromDepth" value="true" type="str"/>
+    <param name="Grid/3D" value="false" type="str"/>
+    <param name="Grid/RangeMax" value="4.0" type="str"/>
+    <param name="Grid/CellSize" value="0.05" type="str"/>
+    <param name="Grid/NormalsSegmentation" value="false" type="str"/>
+    <param name="Grid/MaxGroundHeight" value="0.05" type="str"/>
+    <param name="Grid/MaxObstacleHeight" value="0.60" type="str"/>
+
+    <param name="Mem/IncrementalMemory" value="$(eval &quot;'false' if '$(var localization)' == 'true' else 'true'&quot;)" type="str"/>
+    <param name="Mem/InitWMWithAllNodes" value="$(var localization)" type="str"/>
+
     <remap from="rgbd_image" to="/rgbd_image"/>
     <remap from="odom" to="/odom"/>
   </node>
+
+  <group if="$(var drive)">
+    <include file="$(find-pkg-share rosbridge_server)/launch/rosbridge_websocket_launch.xml"/>
+    <node pkg="rover_motor" exec="motor_node" name="rover_motor" output="screen">
+      <param name="device" value="/dev/ttyUSB0"/>
+      <param name="left_pwm" value="120"/>
+      <param name="right_pwm" value="120"/>
+      <param name="command_timeout_ms" value="500"/>
+    </node>
+  </group>
 </launch>
