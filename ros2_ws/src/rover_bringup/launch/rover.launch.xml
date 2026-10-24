@@ -19,6 +19,19 @@
     <param name="forward_speed" value="0.20"/>
     <param name="reverse_speed" value="-0.15"/>
     <param name="turn_speed" value="0.50"/>
+    <!-- Camera mount: measure on the rover. Height of the lens above the
+         floor (m) and downward tilt (degrees). Wrong values make the floor
+         look like an obstacle or hide low obstacles. -->
+    <param name="camera_height" value="0.20"/>
+    <param name="camera_pitch_deg" value="0.0"/>
+    <!-- Rover width (m); the centre lane is this plus side_margin each side. -->
+    <param name="robot_width" value="0.30"/>
+    <param name="side_margin" value="0.05"/>
+    <!-- Ignore points lower than floor_margin or higher than max_obstacle_height. -->
+    <param name="floor_margin" value="0.04"/>
+    <param name="max_obstacle_height" value="0.50"/>
+    <!-- Only stop for a person in the rover's path and closer than this (m). -->
+    <param name="person_stop_distance" value="1.5"/>
   </node>
 
   <node pkg="rover_motor" exec="motor_node" name="rover_motor" output="screen">

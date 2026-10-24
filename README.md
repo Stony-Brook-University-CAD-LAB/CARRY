@@ -223,7 +223,7 @@ Next for V1:
 1. **Mapping and localization:** build a floor map with RTAB-Map and place AprilTags at drift-prone spots.
 2. **Path planning:** add a navigation stack so the rover can plan between any two points, not only drive forward, and bridge its output to the motors.
 3. **Calibrate wheel encoders and add an IMU:** ticks per meter for each track, then fuse IMU heading with encoder odometry.
-4. **Fix known issues from the October 23 test:** left and right controls are swapped in the app; the camera view is too zoomed in, so objects look closer than they are; obstacle detection needs improvement.
+4. **Fix known issues from the October 23 test:** left and right controls are swapped in the app; the camera view is too zoomed in, so objects look closer than they are. Obstacle detection now ignores the floor and anything outside the rover's path (needs tuning on the rover; see `ros2_ws/README.md`).
 5. **Connectivity:** the rover only works on the UniFi network; evaluate Bluetooth or a USB Wi-Fi dongle.
 6. **Human following:** connect person detection and distance to motion control, with lost-target and obstacle stops.
 7. **Reliability:** 30+ minute runs, battery monitoring, and multiple delivery waypoints on the building map.

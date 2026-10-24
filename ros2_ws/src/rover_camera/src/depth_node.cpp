@@ -26,6 +26,7 @@ public:
     fy_ = declare_parameter<double>("fy", 525.0);
     cx_ = declare_parameter<double>("cx", width_ / 2.0);
     cy_ = declare_parameter<double>("cy", height_ / 2.0);
+    const bool registration = declare_parameter<bool>("depth_registration", false);
 
     image_pub_ = create_publisher<sensor_msgs::msg::Image>("/camera/depth/image_raw", 10);
     info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>("/camera/depth/camera_info", 10);
@@ -41,6 +42,17 @@ public:
     const auto mode_status = depth_.setVideoMode(mode);
     if (mode_status != openni::STATUS_OK) {
       RCLCPP_WARN(get_logger(), "Requested depth mode not accepted; using camera default mode");
+    }
+
+    // Align depth pixels to the colour camera so RTAB-Map can pair them.
+    // Publish with the colour frame_id when this is on.
+    if (registration) {
+      if (device_.isImageRegistrationModeSupported(openni::IMAGE_REGISTRATION_DEPTH_TO_COLOR) &&
+          device_.setImageRegistrationMode(openni::IMAGE_REGISTRATION_DEPTH_TO_COLOR) == openni::STATUS_OK) {
+        RCLCPP_INFO(get_logger(), "Depth registered to colour");
+      } else {
+        RCLCPP_WARN(get_logger(), "Depth-to-colour registration not supported; publishing unregistered depth");
+      }
     }
 
     check(depth_.start(), "Depth stream start");
