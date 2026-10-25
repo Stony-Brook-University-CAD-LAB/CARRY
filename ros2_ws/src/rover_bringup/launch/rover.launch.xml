@@ -8,7 +8,19 @@
     <param name="iou" value="0.45"/>
   </node>
 
+  <!-- Phone / browser bridge: rosbridge WebSocket on :9090 (iOS app) -->
+  <node pkg="rosbridge_server" exec="rosbridge_websocket" name="rosbridge_websocket" output="screen">
+    <param name="port" value="9090"/>
+  </node>
+
+  <!-- MJPEG video with YOLO boxes + status bar on http://<jetson-ip>:5000/stream -->
+  <node pkg="rover_camera" exec="web_stream_node" name="web_stream_node" output="screen">
+    <param name="port" value="5000"/>
+  </node>
+
   <node pkg="rover_navigation" exec="obstacle_avoidance" name="obstacle_avoidance" output="screen">
+    <!-- Start in MANUAL: the app switches this to true for Autonomous. -->
+    <param name="enabled" value="false"/>
     <param name="caution_distance" value="1.0"/>
     <param name="stop_distance" value="0.50"/>
     <param name="too_close_distance" value="0.25"/>

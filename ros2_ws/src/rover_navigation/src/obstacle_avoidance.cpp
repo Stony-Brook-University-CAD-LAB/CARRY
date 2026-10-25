@@ -14,6 +14,7 @@
 #include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/string.hpp"
 
 using namespace std::chrono_literals;
@@ -59,6 +60,11 @@ public:
     no_depth_fraction_ = declare_parameter<double>("no_depth_fraction", 0.6);
     rgb_width_ = declare_parameter<int>("rgb_width", 640);
     rgb_height_ = declare_parameter<int>("rgb_height", 480);
+    // While Autonomous, the iOS app sends /phone/heartbeat 4x/s. If it stops
+    // for this long the node drops back to Manual and stops, so a phone that
+    // loses Wi-Fi cannot leave the rover driving. 0 disables the check (for
+    // autonomous runs started from a terminal).
+    heartbeat_timeout_s_ = declare_parameter<double>("heartbeat_timeout_s", 1.0);
 
     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
     status_pub_ = create_publisher<std_msgs::msg::String>("/navigation/status", 10);
@@ -69,12 +75,19 @@ public:
     yolo_sub_ = create_subscription<std_msgs::msg::String>(
       "/yolo/detections", 10,
       std::bind(&ObstacleAvoidance::yolo_callback, this, std::placeholders::_1));
+    heartbeat_sub_ = create_subscription<std_msgs::msg::Empty>(
+      "/phone/heartbeat", 10,
+      [this](const std_msgs::msg::Empty::SharedPtr) {
+        last_heartbeat_ = now();
+        heard_phone_ = true;
+      });
 
     timer_ = create_wall_timer(50ms, std::bind(&ObstacleAvoidance::control_loop, this));
     param_cb_ = add_on_set_parameters_callback(
       std::bind(&ObstacleAvoidance::parameters_callback, this, std::placeholders::_1));
     state_start_ = now();
     last_person_seen_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+    last_heartbeat_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
     RCLCPP_INFO(get_logger(), "Obstacle avoidance ready (depth + YOLO person stop)");
   }
 
@@ -323,36 +336,57 @@ private:
     result.successful = true;
 
     for (const auto &p : params) {
-      if (p.get_name() != "enabled") continue;
-      const bool enable = p.as_bool();
-      if (enable && !enabled_) {
-        set_state(State::DRIVE);
-        RCLCPP_INFO(get_logger(), "Autonomous enabled");
-      } else if (!enable && enabled_) {
-        // Stop once so the rover does not keep the last autonomous command.
-        publish_cmd(0.0, 0.0);
-        RCLCPP_INFO(get_logger(), "Autonomous disabled");
+      if (p.get_name() == "enabled") {
+        if (p.as_bool() != enabled_) enter_mode(p.as_bool());
+      } else if (p.get_name() == "stop_for_person" && !p.as_bool()) {
+        // Safety: the phone app must never be able to turn this off remotely.
+        result.successful = false;
+        result.reason = "stop_for_person cannot be disabled at runtime";
       }
-      enabled_ = enable;
     }
 
     return result;
   }
 
+  void enter_mode(bool enabled) {
+    enabled_ = enabled;
+    // Start each autonomous run fresh, and leave the wheels stopped at every
+    // mode change.
+    set_state(State::DRIVE);
+    person_avoidance_ = false;
+    publish_cmd(0.0, 0.0);
+    // The heartbeat check arms when the first beat arrives after enabling.
+    if (enabled_) heard_phone_ = false;
+    RCLCPP_INFO(get_logger(), "Mode -> %s", enabled_ ? "AUTONOMOUS" : "MANUAL");
+  }
+
   void control_loop() {
-    // While disabled, stay off /cmd_vel so manual control is not overridden.
+    const bool depth_ok = have_depth_ && (now() - last_depth_).seconds() <= 0.5;
+    const Clearance view = clearance();
+
+    // Manual: report what the depth camera sees, but never publish /cmd_vel;
+    // the phone owns it and a zero Twist from here would fight its commands.
     if (!enabled_) {
-      publish_status("MANUAL", std::numeric_limits<double>::infinity());
+      publish_status(depth_ok ? "MANUAL" : "MANUAL - DEPTH LOST",
+                     depth_ok ? view.center : std::numeric_limits<double>::infinity());
       return;
     }
 
-    if (!have_depth_ || (now() - last_depth_).seconds() > 0.5) {
+    // A phone enabled Autonomous: if it goes silent, hand control back and stop.
+    if (heartbeat_timeout_s_ > 0.0 && heard_phone_ &&
+        (now() - last_heartbeat_).seconds() > heartbeat_timeout_s_) {
+      RCLCPP_WARN(get_logger(), "Phone heartbeat lost: reverting to MANUAL and stopping");
+      set_parameter(rclcpp::Parameter("enabled", false));  // -> parameters_callback -> enter_mode(false)
+      publish_status("PHONE LOST - STOP", view.center);
+      return;
+    }
+
+    if (!depth_ok) {
       publish_cmd(0.0, 0.0);
       publish_status("DEPTH LOST - STOP", std::numeric_limits<double>::infinity());
       return;
     }
 
-    const Clearance view = clearance();
     const double center = view.center;
 
     if (person_recent() && state_ == State::DRIVE) {
@@ -502,6 +536,9 @@ private:
 
   State state_{State::DRIVE};
   bool enabled_{false};
+  double heartbeat_timeout_s_{1.0};
+  bool heard_phone_{false};
+  rclcpp::Time last_heartbeat_;
   std::vector<Clearance> history_;
   rclcpp::Time state_start_;
   rclcpp::Time last_depth_;
@@ -552,6 +589,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr yolo_sub_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr heartbeat_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
 };
