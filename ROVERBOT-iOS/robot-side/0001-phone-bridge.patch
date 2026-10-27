@@ -1,0 +1,237 @@
+diff --git a/src/rover_bringup/launch/manual.launch.xml b/src/rover_bringup/launch/manual.launch.xml
+new file mode 100644
+index 0000000..ca80cf0
+--- /dev/null
++++ b/src/rover_bringup/launch/manual.launch.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0"?>
++<launch>
++  <!-- Manual-only bringup for phone driving: cameras + YOLO + motors + video + bridge.
++       obstacle_avoidance is NOT started, so /cmd_vel belongs to the phone alone. -->
++  <include file="$(find-pkg-share rover_bringup)/launch/sensors.launch.xml"/>
++
++  <node pkg="rover_yolo" exec="yolo_node" name="rover_yolo" output="screen">
++    <param name="engine" value="$(env HOME)/ROVERBOT/models/yolo11n.engine"/>
++    <param name="confidence" value="0.50"/>
++    <param name="iou" value="0.45"/>
++  </node>
++
++  <node pkg="rosbridge_server" exec="rosbridge_websocket" name="rosbridge_websocket" output="screen">
++    <param name="port" value="9090"/>
++  </node>
++
++  <node pkg="rover_camera" exec="web_stream_node" name="web_stream_node" output="screen">
++    <param name="port" value="5000"/>
++  </node>
++
++  <node pkg="rover_motor" exec="motor_node" name="rover_motor" output="screen">
++    <param name="device" value="/dev/ttyUSB0"/>
++    <param name="left_pwm" value="120"/>
++    <param name="right_pwm" value="120"/>
++    <param name="command_timeout_ms" value="500"/>
++  </node>
++</launch>
+diff --git a/src/rover_bringup/launch/rover.launch.xml b/src/rover_bringup/launch/rover.launch.xml
+index 2220fde..5f31c1c 100644
+--- a/src/rover_bringup/launch/rover.launch.xml
++++ b/src/rover_bringup/launch/rover.launch.xml
+@@ -8,7 +8,19 @@
+     <param name="iou" value="0.45"/>
+   </node>
+ 
++  <!-- Phone / browser bridge: rosbridge WebSocket on :9090 (iOS app) -->
++  <node pkg="rosbridge_server" exec="rosbridge_websocket" name="rosbridge_websocket" output="screen">
++    <param name="port" value="9090"/>
++  </node>
++
++  <!-- MJPEG video with YOLO boxes + status bar on http://<jetson-ip>:5000/stream -->
++  <node pkg="rover_camera" exec="web_stream_node" name="web_stream_node" output="screen">
++    <param name="port" value="5000"/>
++  </node>
++
+   <node pkg="rover_navigation" exec="obstacle_avoidance" name="obstacle_avoidance" output="screen">
++    <!-- Start in MANUAL: the app switches this to true for Autonomous. -->
++    <param name="enabled" value="false"/>
+     <param name="caution_distance" value="1.0"/>
+     <param name="stop_distance" value="0.50"/>
+     <param name="too_close_distance" value="0.25"/>
+diff --git a/src/rover_bringup/package.xml b/src/rover_bringup/package.xml
+index 3f89235..3a664d7 100644
+--- a/src/rover_bringup/package.xml
++++ b/src/rover_bringup/package.xml
+@@ -11,6 +11,7 @@
+   <exec_depend>rover_motor</exec_depend>
+   <exec_depend>rover_navigation</exec_depend>
+   <exec_depend>rover_yolo</exec_depend>
++  <exec_depend>rosbridge_server</exec_depend>
+   <exec_depend>tf2_ros</exec_depend>
+   <exec_depend>rtabmap_sync</exec_depend>
+   <exec_depend>rtabmap_odom</exec_depend>
+diff --git a/src/rover_navigation/CMakeLists.txt b/src/rover_navigation/CMakeLists.txt
+index faf2e25..ba98eff 100644
+--- a/src/rover_navigation/CMakeLists.txt
++++ b/src/rover_navigation/CMakeLists.txt
+@@ -10,9 +10,10 @@ find_package(rclcpp REQUIRED)
+ find_package(sensor_msgs REQUIRED)
+ find_package(geometry_msgs REQUIRED)
+ find_package(std_msgs REQUIRED)
++find_package(rcl_interfaces REQUIRED)
+ 
+ add_executable(obstacle_avoidance src/obstacle_avoidance.cpp)
+-ament_target_dependencies(obstacle_avoidance rclcpp sensor_msgs geometry_msgs std_msgs)
++ament_target_dependencies(obstacle_avoidance rclcpp sensor_msgs geometry_msgs std_msgs rcl_interfaces)
+ 
+ install(TARGETS obstacle_avoidance DESTINATION lib/${PROJECT_NAME})
+ 
+diff --git a/src/rover_navigation/package.xml b/src/rover_navigation/package.xml
+index 1378829..00a2584 100644
+--- a/src/rover_navigation/package.xml
++++ b/src/rover_navigation/package.xml
+@@ -11,6 +11,7 @@
+   <depend>sensor_msgs</depend>
+   <depend>geometry_msgs</depend>
+   <depend>std_msgs</depend>
++  <depend>rcl_interfaces</depend>
+ 
+   <export>
+     <build_type>ament_cmake</build_type>
+diff --git a/src/rover_navigation/src/obstacle_avoidance.cpp b/src/rover_navigation/src/obstacle_avoidance.cpp
+index 90e54af..9b78f39 100644
+--- a/src/rover_navigation/src/obstacle_avoidance.cpp
++++ b/src/rover_navigation/src/obstacle_avoidance.cpp
+@@ -11,8 +11,10 @@
+ #include <vector>
+ 
+ #include "geometry_msgs/msg/twist.hpp"
++#include "rcl_interfaces/msg/set_parameters_result.hpp"
+ #include "rclcpp/rclcpp.hpp"
+ #include "sensor_msgs/msg/image.hpp"
++#include "std_msgs/msg/empty.hpp"
+ #include "std_msgs/msg/string.hpp"
+ 
+ using namespace std::chrono_literals;
+@@ -34,6 +36,12 @@ public:
+     person_hold_s_ = declare_parameter<double>("person_hold_s", 0.75);
+     person_confirm_frames_ = declare_parameter<int>("person_confirm_frames", 3);
+     person_clear_frames_ = declare_parameter<int>("person_clear_frames", 3);
++    // "enabled" is the Manual/Autonomous switch used by the iOS app.
++    // false = Manual: this node publishes status only and never touches /cmd_vel.
++    enabled_ = declare_parameter<bool>("enabled", true);
++    // While enabled by a phone, require a /phone/heartbeat at least this often, else revert to Manual.
++    // 0 disables the check (e.g. headless autonomous runs started from the terminal).
++    heartbeat_timeout_s_ = declare_parameter<double>("heartbeat_timeout_s", 1.0);
+ 
+     cmd_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
+     status_pub_ = create_publisher<std_msgs::msg::String>("/navigation/status", 10);
+@@ -45,9 +53,20 @@ public:
+       "/yolo/detections", 10,
+       std::bind(&ObstacleAvoidance::yolo_callback, this, std::placeholders::_1));
+ 
++    heartbeat_sub_ = create_subscription<std_msgs::msg::Empty>(
++      "/phone/heartbeat", 10,
++      [this](const std_msgs::msg::Empty::SharedPtr) {
++        last_heartbeat_ = now();
++        heard_phone_ = true;
++      });
++
++    param_cb_ = add_on_set_parameters_callback(
++      std::bind(&ObstacleAvoidance::parameters_callback, this, std::placeholders::_1));
++
+     timer_ = create_wall_timer(50ms, std::bind(&ObstacleAvoidance::control_loop, this));
+     state_start_ = now();
+     last_person_seen_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
++    last_heartbeat_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+     RCLCPP_INFO(get_logger(), "Obstacle avoidance ready (depth + YOLO person stop)");
+   }
+ 
+@@ -166,15 +185,66 @@ private:
+ 
+   double elapsed() const { return (now() - state_start_).seconds(); }
+ 
++  rcl_interfaces::msg::SetParametersResult parameters_callback(
++      const std::vector<rclcpp::Parameter> &params) {
++    rcl_interfaces::msg::SetParametersResult result;
++    result.successful = true;
++    for (const auto &p : params) {
++      if (p.get_name() == "enabled") {
++        const bool v = p.as_bool();
++        if (v != enabled_) {
++          enter_mode(v);
++        }
++      } else if (p.get_name() == "stop_for_person") {
++        // Safety: the phone app must never be able to turn this off remotely.
++        if (!p.as_bool()) {
++          result.successful = false;
++          result.reason = "stop_for_person cannot be disabled at runtime";
++        }
++      }
++    }
++    return result;
++  }
++
++  void enter_mode(bool enabled) {
++    enabled_ = enabled;
++    // Always start a fresh avoidance cycle, and always leave the wheels stopped
++    // at the moment of a mode change.
++    set_state(State::DRIVE);
++    person_avoidance_ = false;
++    publish_cmd(0.0, 0.0);
++    if (enabled_) heard_phone_ = false;   // the heartbeat check arms once the first beat arrives
++    RCLCPP_INFO(get_logger(), "Mode -> %s", enabled_ ? "AUTONOMOUS" : "MANUAL");
++  }
++
+   void control_loop() {
+-    if (!have_depth_ || (now() - last_depth_).seconds() > 0.5) {
++    const bool depth_ok = have_depth_ && (now() - last_depth_).seconds() <= 0.5;
++    const double center = depth_ok ? region_distance(0.33, 0.67)
++                                   : std::numeric_limits<double>::infinity();
++
++    if (!enabled_) {
++      // Manual mode: report what the depth camera sees, but NEVER publish /cmd_vel.
++      // The iOS app owns /cmd_vel while this is false (checked before the depth test on purpose:
++      // a zero Twist from here would fight the phone's commands).
++      publish_status(depth_ok ? "MANUAL" : "MANUAL - DEPTH LOST", center);
++      return;
++    }
++
++    // Autonomous was enabled by a phone: if the phone goes silent, hand control back (and stop).
++    if (heartbeat_timeout_s_ > 0.0 && heard_phone_ &&
++        (now() - last_heartbeat_).seconds() > heartbeat_timeout_s_) {
++      RCLCPP_WARN(get_logger(), "Phone heartbeat lost: reverting to MANUAL and stopping");
++      set_parameter(rclcpp::Parameter("enabled", false));   // goes through parameters_callback -> enter_mode(false)
++      publish_status("PHONE LOST - STOP", center);
++      return;
++    }
++
++    if (!depth_ok) {
+       publish_cmd(0.0, 0.0);
+       publish_status("DEPTH LOST - STOP", std::numeric_limits<double>::infinity());
+       return;
+     }
+ 
+-    const double center = region_distance(0.33, 0.67);
+-
+     if (person_recent() && state_ == State::DRIVE) {
+       publish_cmd(0.0, 0.0);
+       publish_status("PERSON DETECTED - STOP", center);
+@@ -341,6 +411,10 @@ private:
+   double reverse_speed_{-0.15};
+   double turn_speed_{0.50};
+   bool stop_for_person_{true};
++  bool enabled_{true};
++  double heartbeat_timeout_s_{1.0};
++  bool heard_phone_{false};
++  rclcpp::Time last_heartbeat_;
+   double person_hold_s_{0.75};
+   int person_confirm_frames_{3};
+   int person_clear_frames_{3};
+@@ -351,7 +425,9 @@ private:
+   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
+   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr yolo_sub_;
++  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr heartbeat_sub_;
+   rclcpp::TimerBase::SharedPtr timer_;
++  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
+ };
+ 
+ int main(int argc, char **argv) {

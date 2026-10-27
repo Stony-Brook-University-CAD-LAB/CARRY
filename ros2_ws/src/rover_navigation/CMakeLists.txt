@@ -10,9 +10,10 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 
 add_executable(obstacle_avoidance src/obstacle_avoidance.cpp)
-ament_target_dependencies(obstacle_avoidance rclcpp sensor_msgs geometry_msgs std_msgs)
+ament_target_dependencies(obstacle_avoidance rclcpp sensor_msgs geometry_msgs std_msgs rcl_interfaces)
 
 install(TARGETS obstacle_avoidance DESTINATION lib/${PROJECT_NAME})
 

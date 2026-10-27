@@ -92,6 +92,7 @@ The development workspace has been merged in; these files are present in this re
 | `data/collision/` | Captured free/blocked image pairs. |
 | `building_map.png` | Rendered occupancy map. |
 | `ros2_ws/` | ROS 2 Humble workspace that runs on the rover with the iPad app: motor, camera, YOLO, obstacle-avoidance and launch packages. See `ros2_ws/README.md`. |
+| `ROVERBOT-iOS/` | iPhone/iPad control app (SwiftUI, iOS 17+), provided by Prof. Fang Luo. Build and usage: `ROVERBOT-iOS/INSTALL_AND_USAGE.md`. |
 
 Two items named in the project log are **not** present in this repository: a
 `scripts/yolo_object_detection.py` entry point, and the human-following code. The
@@ -102,7 +103,9 @@ depth-plus-YOLO navigator rather than standalone object detection.
 
 This is the procedure tested on October 23, 2026. The rover and iPad must both be on the lab UniFi Wi-Fi.
 
-The full step-by-step guide is in [`ros2_ws/docs/rover-startup-ipad.md`](ros2_ws/docs/rover-startup-ipad.md).
+The full step-by-step guide is in [`ros2_ws/docs/rover-startup-ipad.md`](ros2_ws/docs/rover-startup-ipad.md). The app itself is in [`ROVERBOT-iOS/`](ROVERBOT-iOS/); see its [install and usage guide](ROVERBOT-iOS/INSTALL_AND_USAGE.md) to build it in Xcode and put it on an iPhone or iPad.
+
+> The app's robot-side patch (`ROVERBOT-iOS/robot-side/0001-phone-bridge.patch`) is **already applied** in `ros2_ws/`. Do not `git apply` it again; just build `ros2_ws` and launch.
 
 | What | Value |
 | --- | --- |
@@ -111,12 +114,16 @@ The full step-by-step guide is in [`ros2_ws/docs/rover-startup-ipad.md`](ros2_ws
 | Video stream | port `5000`, path `/stream` |
 | ROS 2 workspace on the rover | `~/ROVERBOT` (same code as `ros2_ws/` here) |
 
-One command starts rosbridge, both cameras, YOLO, obstacle avoidance, the motor node and the video stream:
+One command starts rosbridge, both cameras, YOLO, obstacle avoidance, the motor node and the video stream. The rover always starts in **Manual**:
 
 ```bash
 cd ~/ROVERBOT && source /opt/ros/humble/setup.bash && source install/setup.bash
-ros2 launch rover_bringup full.launch.xml
+ros2 launch rover_bringup rover.launch.xml
 ```
+
+`full.launch.xml` (used by the `rover` alias) does the same. For phone driving with no obstacle avoidance at all, use `manual.launch.xml`.
+
+While Autonomous, the app sends a heartbeat 4 times a second. If it stops for 1 s (phone off Wi-Fi, app closed), the rover drops back to Manual and stops. Set `heartbeat_timeout_s:=0` on `obstacle_avoidance` only for autonomous runs started from a terminal with no phone.
 
 Then open the iPad app, set rosbridge to `9090` and video to `5000`, and tap **Connect**. **Manual** uses the arrow buttons; **Autonomous** turns on obstacle avoidance. **STOP** always works.
 
@@ -127,7 +134,8 @@ Then open the iPad app, set rosbridge to `9090` and video to `5000`, and tap **C
 | "Package 'rover_motor' not found" | Workspace not sourced | `source install/setup.bash` in every new terminal |
 | "Video: Could not connect" | Nothing on port 5000 | Start the launch file, or `camera_stream.py` for manual-only use |
 | Camera "Resource busy" | Another program holds the Astra (only one can) | `pkill -f camera_stream.py`, then relaunch |
-| "Could not enable Autonomous" | `obstacle_avoidance` not running | Use `full.launch.xml` / `rover.launch.xml` |
+| "Could not enable Autonomous" | `obstacle_avoidance` not running | Use `rover.launch.xml`, not `manual.launch.xml` |
+| Status shows "PHONE LOST - STOP" | App heartbeat stopped while Autonomous | Reconnect; the rover is back in Manual |
 
 Run only one copy of each program: two motor nodes fight over the ESP32 serial port, and two camera programs fight over the Astra.
 

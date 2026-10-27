@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Manual-only bringup for phone driving: cameras + YOLO + motors + video + bridge.
+       obstacle_avoidance is NOT started, so /cmd_vel belongs to the phone alone. -->
+  <include file="$(find-pkg-share rover_bringup)/launch/sensors.launch.xml"/>
+
+  <node pkg="rover_yolo" exec="yolo_node" name="rover_yolo" output="screen">
+    <param name="engine" value="$(env HOME)/ROVERBOT/models/yolo11n.engine"/>
+    <param name="confidence" value="0.50"/>
+    <param name="iou" value="0.45"/>
+  </node>
+
+  <node pkg="rosbridge_server" exec="rosbridge_websocket" name="rosbridge_websocket" output="screen">
+    <param name="port" value="9090"/>
+  </node>
+
+  <node pkg="rover_camera" exec="web_stream_node" name="web_stream_node" output="screen">
+    <param name="port" value="5000"/>
+  </node>
+
+  <node pkg="rover_motor" exec="motor_node" name="rover_motor" output="screen">
+    <param name="device" value="/dev/ttyUSB0"/>
+    <param name="left_pwm" value="120"/>
+    <param name="right_pwm" value="120"/>
+    <param name="command_timeout_ms" value="500"/>
+  </node>
+</launch>
